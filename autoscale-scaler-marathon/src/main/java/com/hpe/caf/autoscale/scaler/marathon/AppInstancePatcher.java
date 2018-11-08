@@ -31,9 +31,12 @@ import java.net.URISyntaxException;
 import java.util.Arrays;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.http.message.BasicNameValuePair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class AppInstancePatcher {
 
+    private final static Logger LOG = LoggerFactory.getLogger(AppInstancePatcher.class);
     private final URI marathonUri;
 
     public AppInstancePatcher(final URI marathonUri){
@@ -57,15 +60,32 @@ public final class AppInstancePatcher {
             uriBuilder.setParameters(Arrays.asList(new BasicNameValuePair("force", Boolean.toString(force))));
             final HttpPatch patch = new HttpPatch(uriBuilder.build());
             patch.setEntity(new StringEntity(appArray.toString(), ContentType.APPLICATION_JSON));
-            final HttpResponse response = client.execute(patch);
-            if(!force && response.getStatusLine().getStatusCode()==409){
-                patchInstances(appId, instances, true);
-                return;
+            int waitTime = 1000;
+            int waitTimeMultiplier = 0;
+            while (true) {
+                final HttpResponse response = client.execute(patch);
+                if (response.getStatusLine().getStatusCode() == 200) {
+                    return;
+                } else if (!force && response.getStatusLine().getStatusCode() == 409) {
+                    patchInstances(appId, instances, true);
+                    return;
+                } else if (response.getStatusLine().getStatusCode() == 503) {
+                    LOG.error("An error occured during the attempt to patch the service {}", appId);
+                    LOG.error("Recieved response code {}", response.getStatusLine().getStatusCode());
+                    LOG.error("Recieved reason phrase {}", response.getStatusLine().getReasonPhrase());
+                    LOG.error("Retrying service patch request after backoff period.");
+                } else {
+                    LOG.error("An error occured during the attempt to patch the service {}", appId);
+                    LOG.error("Recieved response code {}", response.getStatusLine().getStatusCode());
+                    LOG.error("Recieved reason phrase {}", response.getStatusLine().getReasonPhrase());
+                    throw new ScalerException(response.getStatusLine().getReasonPhrase());
+                }
+                final long timeToWait = waitTime * (waitTimeMultiplier < 10 ? waitTimeMultiplier : 10);
+                Thread.sleep(timeToWait);
+                waitTimeMultiplier++;
+                LOG.error("Retry count: " + waitTimeMultiplier);
             }
-            if(response.getStatusLine().getStatusCode()!=200){
-                throw new ScalerException(response.getStatusLine().getReasonPhrase());
-            }
-        } catch (URISyntaxException | IOException ex) {
+        } catch (URISyntaxException | IOException | InterruptedException ex) {
             throw new ScalerException(String.format("Exception patching %s to %s instances.", appId, instances), ex);
         }
     }
